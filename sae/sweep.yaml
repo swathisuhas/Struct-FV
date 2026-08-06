@@ -1,0 +1,25 @@
+program: vital_sae_main.py
+method: random # Can also be 'grid' or 'bayes'
+metric:
+  name: total_loss
+  goal: minimize
+parameters:
+  lr:
+    value: 1.0
+  feat_dist:
+    value: 50.0
+  tv_l2:
+    value: 0.0001
+  l2:
+    value: 0.0001
+  channel:
+    value: 12
+    
+  # --- Variable Parameter ---
+  layer_weights:
+    values:
+      - "0.1, 1.0, 1.0, 1.0"
+      - "0.0, 0.1, 0.5, 1.0"
+      - "0.0, 0.5, 1.0, 1.0"
+      - "0.0, 0.0, 0.0, 1.0"
+ 

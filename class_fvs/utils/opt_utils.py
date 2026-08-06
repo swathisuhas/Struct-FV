@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from scipy.optimize import linear_sum_assignment
 import torchvision.transforms as Tr
 from torchvision.models.feature_extraction import create_feature_extractor
 from torchvision.models.vision_transformer import EncoderBlock
@@ -66,6 +67,111 @@ def visualize_points(iter_idx, syn_img, ref_img, syn_pts, ref_pts, save_dir):
     os.makedirs(save_dir, exist_ok=True)
     plt.savefig(os.path.join(save_dir, f"viz_points_{iter_idx:05d}.png"), dpi=100)
     plt.close()
+
+def visualize_graph_all_cases(
+    iter_idx,
+    syn_img,
+    ref_img,
+    syn_pts,
+    ref_pts,
+    hard_pairs,   # list[(syn_i, ref_j)] from your 1-to-1 mapping
+    save_dir,
+    title_suffix=""
+):
+    def _prepare_img(tensor):
+        img = tensor.detach().cpu().permute(1, 2, 0).numpy()
+        img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+        return img
+
+    def _map_pts(pts, H, W):
+        pts = pts.detach().cpu().numpy()
+        xs = (pts[:, 0] + 1) * 0.5 * (W - 1)
+        ys = (pts[:, 1] + 1) * 0.5 * (H - 1)
+        return xs, ys
+
+    def _draw_complete_graph(ax, xs, ys, colors, edge_alpha=0.18):
+        n = len(xs)
+        for i in range(n):
+            for j in range(i + 1, n):
+                ax.plot(
+                    [xs[i], xs[j]],
+                    [ys[i], ys[j]],
+                    color="white",
+                    alpha=edge_alpha,
+                    linewidth=1.0,
+                    zorder=1,
+                )
+        ax.scatter(
+            xs, ys,
+            c=colors,
+            s=90,
+            edgecolors="black",
+            linewidths=1.6,
+            zorder=3,
+        )
+
+    img_s = _prepare_img(syn_img)
+    img_r = _prepare_img(ref_img)
+    H, W, _ = img_s.shape
+
+    sx, sy = _map_pts(syn_pts, H, W)
+    rx, ry = _map_pts(ref_pts, H, W)
+
+    import matplotlib.cm as cm
+    cmap = cm.get_cmap("tab20", max(len(hard_pairs), 1))
+
+    syn_color_map = {i: cmap(k % 20) for k, (i, j) in enumerate(hard_pairs)}
+    ref_color_map = {j: cmap(k % 20) for k, (i, j) in enumerate(hard_pairs)}
+
+    syn_colors = [syn_color_map.get(i, (0.7, 0.7, 0.7, 1.0)) for i in range(len(sx))]
+    ref_colors = [ref_color_map.get(j, (0.7, 0.7, 0.7, 1.0)) for j in range(len(rx))]
+
+    fig, axs = plt.subplots(1, 2, figsize=(12, 7))
+
+    axs[0].imshow(img_s)
+    axs[0].set_title(f"Synthetic (Iter {iter_idx}) {title_suffix}")
+    axs[0].axis("off")
+
+    axs[1].imshow(img_r)
+    axs[1].set_title(f"Reference (Iter {iter_idx}) {title_suffix}")
+    axs[1].axis("off")
+
+    _draw_complete_graph(axs[0], sx, sy, syn_colors)
+    _draw_complete_graph(axs[1], rx, ry, ref_colors)
+
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    plt.savefig(os.path.join(save_dir, f"viz_graph_{iter_idx:05d}.png"), dpi=120)
+    plt.close()
+
+def hard_one_to_one_matching(score_mat: torch.Tensor, maximize: bool = True):
+    """
+    Compute a hard 1-to-1 assignment with Hungarian matching.
+
+    Args:
+        score_mat: (K_syn, K_ref) tensor.
+                   If maximize=True, larger scores are better.
+                   If maximize=False, smaller costs are better.
+        maximize:   Set True if score_mat is a similarity/probability matrix.
+                    Set False if score_mat is a cost matrix.
+
+    Returns:
+        hard_pairs: list of (syn_i, ref_j)
+        syn_to_ref: dict {syn_i: ref_j}
+        ref_to_syn: dict {ref_j: syn_i}
+    """
+    mat = score_mat.detach().cpu().numpy()
+
+    if maximize:
+        row_ind, col_ind = linear_sum_assignment(-mat)
+    else:
+        row_ind, col_ind = linear_sum_assignment(mat)
+
+    hard_pairs = [(int(i), int(j)) for i, j in zip(row_ind, col_ind)]
+    syn_to_ref = {int(i): int(j) for i, j in zip(row_ind, col_ind)}
+    ref_to_syn = {int(j): int(i) for i, j in zip(row_ind, col_ind)}
+
+    return hard_pairs, syn_to_ref, ref_to_syn
 
 # -------------------------------------- #
 #   VIT ATTRIBUTION (Grad x Attn Rollout)
@@ -552,6 +658,12 @@ class DeepFeaturesClass(object):
 
                 loss_graph = torch.tensor(0.0, device=inputs.device)
 
+                viz_syn_graph = None
+                viz_ref_graph = None
+                viz_syn_pts = None
+                viz_ref_pts = None
+                viz_ref_img = None
+                viz_hard_pairs = None
                 graph_active = self.lambda_graph > 0
 
                 if graph_active:
@@ -682,6 +794,12 @@ class DeepFeaturesClass(object):
                                     best_real_pts_raw = real_pos_flat[idx_tensor]
                                     best_ref_img_idx = r_idx
 
+                                    viz_syn_graph = g_syn
+                                    viz_ref_graph = g_real_refined
+                                    viz_syn_pts = g_syn["nodes_p_raw"]
+                                    viz_ref_pts = best_real_pts_raw
+                                    viz_ref_img = img_real_jit[best_ref_img_idx].detach()
+
                         if len(batch_ref_losses) > 0:
                             losses_stack = torch.stack(batch_ref_losses)
                             loss_b = softmin_over_refs(losses_stack, tau=0.5)
@@ -702,6 +820,58 @@ class DeepFeaturesClass(object):
 
                     if len(per_syn_losses) > 0:
                         loss_graph = torch.stack(per_syn_losses).mean()
+
+                
+                if not graph_active:
+                    syn_feat_map = syn_out[self.graph_layer_key]
+                    ref_feat_map = real_feat_for_graph[0:1]
+
+                    viz_syn_graph = _build_graph_from_featmap(
+                        syn_feat_map[0:1],
+                        K_parts=self.graph_K,
+                        importance_vec=None
+                    )
+                    viz_ref_graph = _build_graph_from_featmap(
+                        ref_feat_map,
+                        K_parts=self.graph_K,
+                        importance_vec=None
+                    )
+
+                    syn_vecs_viz = F.normalize(viz_syn_graph["nodes_f"], dim=-1)
+                    ref_vecs_viz = F.normalize(viz_ref_graph["nodes_f"], dim=-1)
+                    C_viz = 1.0 - (syn_vecs_viz @ ref_vecs_viz.t())
+                    viz_hard_pairs, _, _ = hard_one_to_one_matching(C_viz, maximize=False)
+
+                    viz_syn_pts = viz_syn_graph["nodes_p_raw"]
+                    viz_ref_pts = viz_ref_graph["nodes_p_raw"]
+                    viz_ref_img = img_real_jit[0].detach()
+                else:
+                    if viz_syn_graph is None or viz_ref_graph is None:
+                        viz_syn_graph = g_syn
+                        viz_ref_graph = g_real_refined
+                        viz_syn_pts = g_syn["nodes_p_raw"]
+                        viz_ref_pts = best_real_pts_raw
+                        viz_ref_img = img_real_jit[best_ref_img_idx].detach()
+
+                if (iteration % self.print_every == 0) and (viz_syn_graph is not None) and (viz_ref_graph is not None):
+                    syn_img_viz = inputs_jit[0].detach()
+
+                    if viz_hard_pairs is None:
+                        syn_vecs_viz = F.normalize(viz_syn_graph["nodes_f"], dim=-1)
+                        ref_vecs_viz = F.normalize(viz_ref_graph["nodes_f"], dim=-1)
+                        C_viz = 1.0 - (syn_vecs_viz @ ref_vecs_viz.t())
+                        viz_hard_pairs, _, _ = hard_one_to_one_matching(C_viz, maximize=False)
+
+                    visualize_graph_all_cases(
+                        iter_idx=iteration,
+                        syn_img=syn_img_viz,
+                        ref_img=viz_ref_img,
+                        syn_pts=viz_syn_pts,
+                        ref_pts=viz_ref_pts,
+                        hard_pairs=viz_hard_pairs,
+                        save_dir=os.path.join(self.folder_name, "graph_debug"),
+                        title_suffix="(graph active)" if graph_active else "(graph inactive)",
+                    )
 
                 # Priors
                 loss_var_l1, loss_var_l2 = get_image_prior_losses(inputs_jit)
