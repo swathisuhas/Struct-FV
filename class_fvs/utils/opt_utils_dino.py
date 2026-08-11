@@ -454,6 +454,144 @@ def graph_matching_loss(
 
     return L_edges_dist
 
+def _select_reference_indices(C_full: torch.Tensor, graph_K: int, arch_name: str, mnn_k: int = 3):
+    """Select exactly graph_K unique reference spatial locations using the same
+    correspondence logic used during Struct-FV optimization."""
+    K_syn, N_real = C_full.shape
+
+    if 'vit' in arch_name:
+        k_mnn = min(mnn_k, N_real, K_syn)
+        syn_topk = torch.topk(-C_full, k=k_mnn, dim=1).indices
+        real_topk = torch.topk(-C_full.t(), k=k_mnn, dim=1).indices
+
+        selected_indices = []
+        seen = set()
+
+        for i in range(K_syn):
+            for j in syn_topk[i].tolist():
+                if i in real_topk[j].tolist() and j not in seen:
+                    selected_indices.append(j)
+                    seen.add(j)
+                    break
+
+        if len(selected_indices) < graph_K:
+            C_flat = C_full.view(-1)
+            _, indices = torch.sort(C_flat)
+            real_candidates = indices % N_real
+            for j in real_candidates.tolist():
+                if j not in seen:
+                    selected_indices.append(j)
+                    seen.add(j)
+                if len(selected_indices) == graph_K:
+                    break
+    else:
+        C_flat = C_full.view(-1)
+        _, indices = torch.sort(C_flat)
+        real_candidates = indices % N_real
+
+        selected_indices = []
+        seen = set()
+        for j in real_candidates.tolist():
+            if j not in seen:
+                selected_indices.append(j)
+                seen.add(j)
+            if len(selected_indices) == graph_K:
+                break
+
+    return selected_indices
+
+def save_final_graph_eval_nodes(
+    model2,
+    model,
+    inputs,
+    real_out,
+    ref_paths,
+    targets,
+    graph_layer_key,
+    graph_K,
+    arch_name,
+    graph_mnn_k,
+    folder_name,
+):
+    """After optimization, recompute the final Struct-FV graph correspondences
+    against all saved reference images and store only spatial coordinates/paths.
+
+    These saved coordinates are later reused for the external DINO evaluation.
+    No DINO computation happens here.
+    """
+    model2.eval()
+
+    with torch.no_grad():
+        syn_out_final = model2(inputs)
+        syn_feat_map = syn_out_final[graph_layer_key]
+
+    importance_vec = None
+    if 'vit' in arch_name:
+        with torch.enable_grad():
+            patch_scores = vit_patch_attribution_rollout(
+                model=model,
+                x_normed=inputs,
+                target_idx=int(targets),
+                start_layer=0,
+            )
+        if inputs.grad is not None:
+            inputs.grad.zero_()
+        importance_vec = patch_scores[0].detach()
+
+    syn_graph = _build_graph_from_featmap(
+        syn_feat_map[0:1],
+        K_parts=graph_K,
+        importance_vec=importance_vec,
+    )
+
+    ref_coords = []
+    for r_idx in range(real_out[graph_layer_key].shape[0]):
+        rf_map = real_out[graph_layer_key][r_idx:r_idx + 1]
+        real_feats_flat, real_pos_flat, _, _ = _flatten_feats_positions(rf_map)
+        real_feats_flat = real_feats_flat[0]
+        real_pos_flat = real_pos_flat[0]
+
+        f_r_std = (
+            (real_feats_flat - real_feats_flat.mean(0, keepdim=True))
+            / (real_feats_flat.std(0, keepdim=True) + 1e-6)
+        )
+        real_vecs_all = F.normalize(f_r_std, dim=-1)
+        syn_vecs = F.normalize(syn_graph["nodes_f"], dim=-1)
+
+        C_full = 1.0 - (syn_vecs @ real_vecs_all.t())
+        selected_indices = _select_reference_indices(
+            C_full=C_full,
+            graph_K=graph_K,
+            arch_name=arch_name,
+            mnn_k=graph_mnn_k,
+        )
+
+        if len(selected_indices) != graph_K:
+            raise RuntimeError(
+                f"Reference {r_idx}: selected {len(selected_indices)} nodes, "
+                f"expected {graph_K}."
+            )
+
+        ref_coords.append(real_pos_flat[
+            torch.tensor(selected_indices, device=real_pos_flat.device)
+        ].detach().cpu())
+
+    payload = {
+        "syn_nodes_xy": syn_graph["nodes_p_raw"].detach().cpu(),
+        "ref_nodes_xy": torch.stack(ref_coords, dim=0),
+        "reference_paths": ref_paths,
+        "target_class": int(targets),
+        "graph_K": int(graph_K),
+        "graph_layer_key": graph_layer_key,
+        "arch_name": arch_name,
+    }
+
+    os.makedirs(folder_name, exist_ok=True)
+    out_path = os.path.join(folder_name, "graph_eval_nodes.pt")
+    torch.save(payload, out_path)
+    print(f"Saved final graph evaluation nodes to: {out_path}")
+    return out_path
+
 
 def softmin_over_refs(losses: torch.Tensor, tau: float = 0.5) -> torch.Tensor:
     return -tau * torch.logsumexp(-losses / max(tau, 1e-6), dim=0)
@@ -476,22 +614,25 @@ def obtain_real_imgs_random(targets, num_real_img):
     random.shuffle(class_files)
 
     img_real = []
+    ref_paths = []
     inc_img = 0
     for file in class_files:
         if inc_img == num_real_img:
             break
         try:
-            img = Image.open(os.path.join(IMAGENET_DIR, class_path, file))
+            img_path = os.path.join(IMAGENET_DIR, class_path, file)
+            img = Image.open(img_path)
             if len(img.split()) != 3:
                 continue
             inc_img += 1
             img_p = transforms_all(img)
             img_real.append(img_p)
+            ref_paths.append(img_path)
         except Exception:
             continue
 
     img_real = torch.stack(img_real, 0)
-    return img_real.to('cuda')
+    return img_real.to('cuda'), ref_paths
 
 
 def sort_matching(target, input):
@@ -597,7 +738,11 @@ class DeepFeaturesClass(object):
         model2 = create_feature_extractor(model, return_nodes=return_nodes)
         model2.eval()
 
-        img_real = obtain_real_imgs_random(targets=targets, num_real_img=self.num_real_img)
+        img_real, ref_paths = obtain_real_imgs_random(
+            targets=targets,
+            num_real_img=self.num_real_img
+        )
+
         inputs = torch.randn(
             (1, 3, self.image_resolution, self.image_resolution),
             requires_grad=True,
@@ -896,6 +1041,20 @@ class DeepFeaturesClass(object):
 
         best_inputs = denormalize(inputs.data.clone())
         self.save_images(best_inputs)
+
+        save_final_graph_eval_nodes(
+            model2=model2,
+            model=self.model,
+            inputs=inputs.detach().requires_grad_(True),
+            real_out=real_out,
+            ref_paths=ref_paths,
+            targets=targets,
+            graph_layer_key=self.graph_layer_key,
+            graph_K=self.graph_K,
+            arch_name=self.arch_name,
+            graph_mnn_k=self.graph_mnn_k,
+            folder_name=self.folder_name,
+        )
 
     def save_images(self, images):
         for idx in range(images.shape[0]):
