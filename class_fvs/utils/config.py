@@ -4,7 +4,7 @@ CONFIGS = {
         "layer_weights": [1, 1, 1, 1, 1],
         "tv_l2": 0.0001,
         "l2": 0.0001,
-        "lambda_graph": 1,
+        "lambda_graph": 0.5,
         "graph_K": 32
     },
     "vit_l_16": {
@@ -30,6 +30,9 @@ CONFIGS = {
     }
 }
 
+SPLIT_SEED = 42
+REFERENCE_SPLIT = "selection"   # "selection" or "heldout"
+
 def get_config(args):
     defaults = CONFIGS[args.arch_name]
 
@@ -47,6 +50,14 @@ def get_config(args):
 
     if getattr(args, "l2", None) is None:
         args.l2 = defaults["l2"]
+        
+    # Fixed reference-data partition
+    args.split_seed = SPLIT_SEED
+    args.reference_split = REFERENCE_SPLIT
+
+    # Optimization seed = run/trial ID
+    args.seed = args.run_id
+
 
     args.setup_folder = getattr(args, 'setup_folder', "class_neurons")
 

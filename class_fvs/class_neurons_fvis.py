@@ -8,7 +8,7 @@ import torch
 import os
 import torchvision.models as models
 from utils.utils import create_folder
-from utils.opt_utils import DeepFeaturesClass
+from utils.opt_utils_dino import DeepFeaturesClass
 from utils.config import get_config
 
 
@@ -40,6 +40,9 @@ def run(args):
     parameters['graph_layer_key'] = args.graph_layer_key
     parameters['graph_num_refs_per_step'] = args.graph_num_refs_per_step
     parameters['graph_mnn_k'] = args.graph_mnn_k
+    parameters['split_seed'] = args.split_seed
+    parameters['reference_split'] = args.reference_split
+    parameters['seed'] = args.seed
 
     coefficients = dict()
     coefficients["tv_l1"] = args.tv_l1

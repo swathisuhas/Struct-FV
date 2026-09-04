@@ -72,25 +72,49 @@ def visualize_graph_all_cases(
     iter_idx,
     syn_img,
     ref_img,
-    syn_pts,
-    ref_pts,
-    hard_pairs,   # list[(syn_i, ref_j)] from your 1-to-1 mapping
+    syn_graph,
+    ref_graph,
+    hard_pairs,
     save_dir,
-    title_suffix=""
+    title_suffix="",
+    viz_k=10,
 ):
+    """
+    Visualize only the top-k most important SYNTHETIC graph nodes
+    and their corresponding matched reference nodes.
+
+    IMPORTANT:
+    - The full graph_K nodes are still used during optimization.
+    - This function only changes visualization.
+    - Top-k is determined from synthetic node importance.
+    - Reference nodes are the nodes matched to those synthetic nodes.
+    """
+
     def _prepare_img(tensor):
         img = tensor.detach().cpu().permute(1, 2, 0).numpy()
-        img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+        img = (img - img.min()) / (
+            img.max() - img.min() + 1e-8
+        )
         return img
 
     def _map_pts(pts, H, W):
         pts = pts.detach().cpu().numpy()
+
         xs = (pts[:, 0] + 1) * 0.5 * (W - 1)
         ys = (pts[:, 1] + 1) * 0.5 * (H - 1)
+
         return xs, ys
 
-    def _draw_complete_graph(ax, xs, ys, colors, edge_alpha=0.18):
+    def _draw_complete_graph(
+        ax,
+        xs,
+        ys,
+        colors,
+        edge_alpha=0.18,
+    ):
         n = len(xs)
+
+        # Draw edges between all displayed nodes
         for i in range(n):
             for j in range(i + 1, n):
                 ax.plot(
@@ -101,47 +125,182 @@ def visualize_graph_all_cases(
                     linewidth=1.0,
                     zorder=1,
                 )
+
+        # Draw nodes
         ax.scatter(
-            xs, ys,
+            xs,
+            ys,
             c=colors,
-            s=90,
+            s=150,
             edgecolors="black",
             linewidths=1.6,
             zorder=3,
         )
 
+    # --------------------------------------------------
+    # Prepare images
+    # --------------------------------------------------
+
     img_s = _prepare_img(syn_img)
     img_r = _prepare_img(ref_img)
+
     H, W, _ = img_s.shape
 
-    sx, sy = _map_pts(syn_pts, H, W)
-    rx, ry = _map_pts(ref_pts, H, W)
+    # --------------------------------------------------
+    # Find top-k most important SYNTHETIC nodes
+    # --------------------------------------------------
+
+    importance = syn_graph["node_importance"]
+
+    k = min(
+        viz_k,
+        importance.numel(),
+        len(hard_pairs),
+    )
+
+    top_syn_indices = torch.topk(
+        importance,
+        k=k,
+        largest=True,
+    ).indices.tolist()
+
+    # --------------------------------------------------
+    # Get the reference node matched to each top node
+    # --------------------------------------------------
+
+    syn_to_ref = {
+        int(syn_i): int(ref_j)
+        for syn_i, ref_j in hard_pairs
+    }
+
+    selected_pairs = []
+
+    for syn_i in top_syn_indices:
+        if syn_i in syn_to_ref:
+            selected_pairs.append(
+                (syn_i, syn_to_ref[syn_i])
+            )
+
+    if len(selected_pairs) == 0:
+        print(
+            f"Warning: no matched nodes available "
+            f"for visualization at iteration {iter_idx}"
+        )
+        return
+
+    # --------------------------------------------------
+    # Extract exactly those locations
+    # --------------------------------------------------
+
+    syn_indices = torch.tensor(
+        [i for i, _ in selected_pairs],
+        dtype=torch.long,
+        device=syn_graph["nodes_p_raw"].device,
+    )
+
+    ref_indices = torch.tensor(
+        [j for _, j in selected_pairs],
+        dtype=torch.long,
+        device=ref_graph["nodes_p"].device,
+    )
+
+    syn_pts_viz = syn_graph["nodes_p_raw"][syn_indices]
+
+    # ref_graph may not contain nodes_p_raw in your refined graph,
+    # so nodes_p is used here.
+    ref_pts_viz = ref_graph["nodes_p"][ref_indices]
+
+    # --------------------------------------------------
+    # Convert normalized coordinates to image coordinates
+    # --------------------------------------------------
+
+    sx, sy = _map_pts(
+        syn_pts_viz,
+        H,
+        W,
+    )
+
+    rx, ry = _map_pts(
+        ref_pts_viz,
+        H,
+        W,
+    )
+
+    # --------------------------------------------------
+    # Give every correspondence a distinct color
+    # --------------------------------------------------
 
     import matplotlib.cm as cm
-    cmap = cm.get_cmap("tab20", max(len(hard_pairs), 1))
 
-    syn_color_map = {i: cmap(k % 20) for k, (i, j) in enumerate(hard_pairs)}
-    ref_color_map = {j: cmap(k % 20) for k, (i, j) in enumerate(hard_pairs)}
+    cmap = cm.get_cmap(
+        "tab10",
+        max(len(selected_pairs), 1),
+    )
 
-    syn_colors = [syn_color_map.get(i, (0.7, 0.7, 0.7, 1.0)) for i in range(len(sx))]
-    ref_colors = [ref_color_map.get(j, (0.7, 0.7, 0.7, 1.0)) for j in range(len(rx))]
+    colors = [
+        cmap(i)
+        for i in range(len(selected_pairs))
+    ]
 
-    fig, axs = plt.subplots(1, 2, figsize=(12, 7))
+    # Same color ordering on both sides means:
+    #
+    # synthetic red   <-> reference red
+    # synthetic blue  <-> reference blue
+    # etc.
+    syn_colors = colors
+    ref_colors = colors
+
+    # --------------------------------------------------
+    # Plot
+    # --------------------------------------------------
+
+    fig, axs = plt.subplots(
+        1,
+        2,
+        figsize=(12, 7),
+    )
 
     axs[0].imshow(img_s)
-    axs[0].set_title(f"Synthetic (Iter {iter_idx}) {title_suffix}")
+    axs[0].set_title(
+        f"Synthetic (Iter {iter_idx}) {title_suffix}"
+    )
     axs[0].axis("off")
 
     axs[1].imshow(img_r)
-    axs[1].set_title(f"Reference (Iter {iter_idx}) {title_suffix}")
+    axs[1].set_title(
+        f"Reference (Iter {iter_idx}) {title_suffix}"
+    )
     axs[1].axis("off")
 
-    _draw_complete_graph(axs[0], sx, sy, syn_colors)
-    _draw_complete_graph(axs[1], rx, ry, ref_colors)
+    _draw_complete_graph(
+        axs[0],
+        sx,
+        sy,
+        syn_colors,
+    )
+
+    _draw_complete_graph(
+        axs[1],
+        rx,
+        ry,
+        ref_colors,
+    )
 
     plt.tight_layout()
-    os.makedirs(save_dir, exist_ok=True)
-    plt.savefig(os.path.join(save_dir, f"viz_graph_{iter_idx:05d}.png"), dpi=120)
+
+    os.makedirs(
+        save_dir,
+        exist_ok=True,
+    )
+
+    plt.savefig(
+        os.path.join(
+            save_dir,
+            f"viz_graph_{iter_idx:05d}.png",
+        ),
+        dpi=120,
+    )
+
     plt.close()
 
 def hard_one_to_one_matching(score_mat: torch.Tensor, maximize: bool = True):
@@ -406,7 +565,8 @@ def _build_graph_from_featmap(
         nodes_f=nodes_f,
         nodes_p=nodes_p,
         nodes_p_raw=nodes_p_raw,
-        Dnorm=Dnorm
+        Dnorm=Dnorm,
+        node_importance=mags[top_indices],
     )
 
 
@@ -454,6 +614,7 @@ def graph_matching_loss(
 
     return L_edges_dist
 
+
 def _select_reference_indices(C_full: torch.Tensor, graph_K: int, arch_name: str, mnn_k: int = 3):
     """Select exactly graph_K unique reference spatial locations using the same
     correspondence logic used during Struct-FV optimization."""
@@ -499,6 +660,7 @@ def _select_reference_indices(C_full: torch.Tensor, graph_K: int, arch_name: str
                 break
 
     return selected_indices
+
 
 def save_final_graph_eval_nodes(
     model2,
@@ -597,8 +759,54 @@ def softmin_over_refs(losses: torch.Tensor, tau: float = 0.5) -> torch.Tensor:
     return -tau * torch.logsumexp(-losses / max(tau, 1e-6), dim=0)
 
 
-def obtain_real_imgs_random(targets, num_real_img):
-    normalize = Tr.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+# def obtain_real_imgs_random(targets, num_real_img):
+#     normalize = Tr.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+#     transforms_all = Tr.Compose([
+#         Tr.Resize(256),
+#         Tr.CenterCrop(224),
+#         Tr.PILToTensor(),
+#         Tr.ConvertImageDtype(torch.float),
+#         normalize,
+#     ])
+
+#     class_number = targets
+#     class_path = sorted(os.listdir(IMAGENET_DIR))[class_number]
+#     class_files = os.listdir(os.path.join(IMAGENET_DIR, class_path))
+#     random.shuffle(class_files)
+
+#     img_real = []
+#     ref_paths = []
+#     inc_img = 0
+#     for file in class_files:
+#         if inc_img == num_real_img:
+#             break
+#         try:
+#             img_path = os.path.join(IMAGENET_DIR, class_path, file)
+#             img = Image.open(img_path)
+#             if len(img.split()) != 3:
+#                 continue
+#             inc_img += 1
+#             img_p = transforms_all(img)
+#             img_real.append(img_p)
+#             ref_paths.append(img_path)
+#         except Exception:
+#             continue
+
+#     img_real = torch.stack(img_real, 0)
+#     return img_real.to('cuda'), ref_paths
+
+def obtain_real_imgs_random(
+    targets,
+    num_real_img,
+    split_seed,
+    reference_split,
+    run_seed,
+):
+    normalize = Tr.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
 
     transforms_all = Tr.Compose([
         Tr.Resize(256),
@@ -610,30 +818,80 @@ def obtain_real_imgs_random(targets, num_real_img):
 
     class_number = targets
     class_path = sorted(os.listdir(IMAGENET_DIR))[class_number]
-    class_files = os.listdir(os.path.join(IMAGENET_DIR, class_path))
-    random.shuffle(class_files)
+    class_dir = os.path.join(IMAGENET_DIR, class_path)
+
+    # Always start from a deterministic ordering.
+    class_files = sorted(os.listdir(class_dir))
+
+    # --------------------------------------------------
+    # Fixed 50/50 selection/held-out split.
+    # This MUST NOT depend on run_id.
+    # --------------------------------------------------
+    split_rng = random.Random(split_seed)
+    split_rng.shuffle(class_files)
+
+    split_idx = len(class_files) // 2
+
+    if reference_split == "selection":
+        candidate_files = class_files[:split_idx]
+    elif reference_split == "heldout":
+        candidate_files = class_files[split_idx:]
+    else:
+        raise ValueError(
+            f"Unknown reference_split: {reference_split}. "
+            "Expected 'selection' or 'heldout'."
+        )
+
+    # --------------------------------------------------
+    # Trial-specific reference images.
+    #
+    # run 0 gets one reference subset
+    # run 1 gets another
+    # run 2 gets another
+    #
+    # Same run_seed => same refs across all lambdas.
+    # --------------------------------------------------
+    ref_rng = random.Random(run_seed)
+    ref_rng.shuffle(candidate_files)
 
     img_real = []
     ref_paths = []
-    inc_img = 0
-    for file in class_files:
-        if inc_img == num_real_img:
+
+    for file in candidate_files:
+        if len(img_real) == num_real_img:
             break
+
         try:
-            img_path = os.path.join(IMAGENET_DIR, class_path, file)
+            img_path = os.path.join(class_dir, file)
             img = Image.open(img_path)
+
             if len(img.split()) != 3:
                 continue
-            inc_img += 1
+
             img_p = transforms_all(img)
+
             img_real.append(img_p)
             ref_paths.append(img_path)
+
         except Exception:
             continue
 
-    img_real = torch.stack(img_real, 0)
-    return img_real.to('cuda'), ref_paths
+    if len(img_real) < num_real_img:
+        raise RuntimeError(
+            f"Only found {len(img_real)} valid reference images, "
+            f"but requested {num_real_img}."
+        )
 
+    img_real = torch.stack(img_real, 0)
+
+    print(
+        f"Reference split: {reference_split} | "
+        f"split_seed: {split_seed} | "
+        f"run_seed: {run_seed} | "
+        f"references: {len(ref_paths)}"
+    )
+
+    return img_real.to("cuda"), ref_paths
 
 def sort_matching(target, input):
     B, C = target.size(0), target.size(1)
@@ -685,6 +943,10 @@ class DeepFeaturesClass(object):
         self.graph_layer_key = parameters['graph_layer_key']
         self.graph_num_refs_per_step = parameters['graph_num_refs_per_step']
         self.graph_mnn_k = parameters['graph_mnn_k']
+        
+        self.split_seed = parameters["split_seed"]
+        self.reference_split = parameters["reference_split"]
+        self.seed = parameters["seed"]
 
         self.print_every = 100
 
@@ -700,6 +962,12 @@ class DeepFeaturesClass(object):
 
     def get_images(self, targets=None):
         print("Get Struct-FV call")
+        
+        # Reproducible trial: same run_id => same randomness across lambdas
+        random.seed(self.seed)
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        torch.cuda.manual_seed_all(self.seed)
 
         model = self.model
         data_type = torch.float
@@ -738,11 +1006,18 @@ class DeepFeaturesClass(object):
         model2 = create_feature_extractor(model, return_nodes=return_nodes)
         model2.eval()
 
+        # img_real, ref_paths = obtain_real_imgs_random(
+        #     targets=targets,
+        #     num_real_img=self.num_real_img
+        # )
+        
         img_real, ref_paths = obtain_real_imgs_random(
             targets=targets,
-            num_real_img=self.num_real_img
+            num_real_img=self.num_real_img,
+            split_seed=self.split_seed,
+            reference_split=self.reference_split,
+            run_seed=self.seed,
         )
-
         inputs = torch.randn(
             (1, 3, self.image_resolution, self.image_resolution),
             requires_grad=True,
@@ -998,7 +1273,8 @@ class DeepFeaturesClass(object):
                         viz_ref_pts = best_real_pts_raw
                         viz_ref_img = img_real_jit[best_ref_img_idx].detach()
 
-                if (iteration % self.print_every == 0) and (viz_syn_graph is not None) and (viz_ref_graph is not None):
+                # if (iteration % self.print_every == 0) and (viz_syn_graph is not None) and (viz_ref_graph is not None):
+                if (iteration == iterations_per_layer) and (viz_syn_graph is not None) and (viz_ref_graph is not None):
                     syn_img_viz = inputs_jit[0].detach()
 
                     if viz_hard_pairs is None:
@@ -1011,11 +1287,19 @@ class DeepFeaturesClass(object):
                         iter_idx=iteration,
                         syn_img=syn_img_viz,
                         ref_img=viz_ref_img,
-                        syn_pts=viz_syn_pts,
-                        ref_pts=viz_ref_pts,
+                        syn_graph=viz_syn_graph,
+                        ref_graph=viz_ref_graph,
                         hard_pairs=viz_hard_pairs,
-                        save_dir=os.path.join(self.folder_name, "graph_debug"),
-                        title_suffix="(graph active)" if graph_active else "(graph inactive)",
+                        save_dir=os.path.join(
+                            self.folder_name,
+                            "graph_debug"
+                        ),
+                        title_suffix=(
+                            "(graph active)"
+                            if graph_active
+                            else "(graph inactive)"
+                        ),
+                        viz_k=10,
                     )
 
                 # Priors
