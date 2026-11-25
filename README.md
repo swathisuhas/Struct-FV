@@ -52,7 +52,8 @@ $$
 where:
 - $K$ is the number of selected graph nodes.
 - $\Pi_{ik}$ represents the Sinkhorn correspondence weight between synthetic node $i$ and reference node $k$.
-- $\tilde{d}_{ij}^{\mathrm{syn}}$ and $\tilde{d}_{kl}^{\mathrm{real}}$ are normalized pairwise spatial distances.
+- $`\tilde{d}_{ij}^{\mathrm{syn}}`$ and $`\tilde{d}_{kl}^{\mathrm{real}}`$ represent normalized pairwise spatial distances.
+
 
 ### Reference Graph Aggregation
 
@@ -109,7 +110,7 @@ Struct-FV was compared against existing feature visualization methods, including
 
 ### Qualitative Results
 
-![Feature Visualization Comparison](assets/comparison.png)
+![Feature Visualization Comparison](comparison.png)
 Struct-FV improves semantic alignment and spatial coherence across CNN and Vision Transformer architectures while maintaining high model faithfulness.
 
 ### CLIP Zero-Shot Top-1 Accuracy (%)
