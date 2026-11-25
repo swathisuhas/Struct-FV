@@ -33,13 +33,56 @@ The framework consists of four main stages:
 3. **Optimal Transport:** Apply Sinkhorn optimal transport to obtain soft node correspondences.
 4. **Structural Optimization:** Minimize a graph matching loss based on pairwise spatial distances, encouraging coherent feature arrangements.
 
-The resulting objective combines the VITAL feature distribution matching loss with the proposed structural loss:
 
-\[
-\mathcal{L}_{\text{Struct-FV}} =
-\mathcal{L}_{\text{VITAL}} +
-\lambda \mathcal{L}_{\text{graph}}
-\]
+### Graph Matching Loss
+
+The graph matching loss measures structural differences between synthetic and reference graphs using pairwise spatial distances weighted by soft correspondences obtained through Sinkhorn optimal transport.
+
+$$
+\mathcal{L}_r =
+\sum_{i,j=1}^{K}
+\sum_{k,l=1}^{K}
+\Pi_{ik}\Pi_{jl}
+\left(
+\tilde{d}_{ij}^{\mathrm{syn}} -
+\tilde{d}_{kl}^{\mathrm{real}}
+\right)^2
+$$
+
+where:
+- $K$ is the number of selected graph nodes.
+- $\Pi_{ik}$ represents the Sinkhorn correspondence weight between synthetic node $i$ and reference node $k$.
+- $\tilde{d}_{ij}^{\mathrm{syn}}$ and $\tilde{d}_{kl}^{\mathrm{real}}$ are normalized pairwise spatial distances.
+
+### Reference Graph Aggregation
+
+To incorporate multiple reference images, Struct-FV randomly samples a subset of reference graphs and combines their losses using softmin aggregation:
+
+$$
+\mathcal{L}_{\mathrm{graph}} =
+-\tau \log
+\sum_{r \in \mathcal{S}}
+\exp\left(
+-\frac{\mathcal{L}_r}{\tau}
+\right)
+$$
+
+where $\mathcal{S}$ denotes the sampled reference graphs and $\tau$ is the softmin temperature.
+
+### Final Optimization Objective
+
+The complete Struct-FV objective combines feature distribution matching with structural graph matching:
+
+$$
+\boxed{
+\mathcal{L}_{\mathrm{Struct-FV}} =
+\mathcal{L}_{\mathrm{VITAL}} +
+\lambda \mathcal{L}_{\mathrm{graph}}
+}
+$$
+
+Here, $\lambda$ controls the contribution of structural consistency during feature visualization.
+
 
 ## Experiments
 
