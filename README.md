@@ -110,7 +110,7 @@ Struct-FV was compared against existing feature visualization methods, including
 
 ### Qualitative Results
 
-![Feature Visualization Comparison](comparison.png)
+![Feature Visualization Comparison](comparison.PNG)
 Struct-FV improves semantic alignment and spatial coherence across CNN and Vision Transformer architectures while maintaining high model faithfulness.
 
 ### CLIP Zero-Shot Top-1 Accuracy (%)
